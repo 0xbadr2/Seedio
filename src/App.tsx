@@ -51,7 +51,7 @@ const XIcon = (props: React.SVGProps<SVGSVGElement>) => (
 
 function MainApp() {
   const wallet = useWallet();
-  const { connected, account, connect, disconnect } = wallet;
+  const { connected, account, connect, disconnect, signAndSubmitTransaction } = wallet;
 
   const handleConnect = async () => {
     try {
@@ -127,7 +127,7 @@ function MainApp() {
 
   const handleUploadFile = async () => {
     if (!selectedFile) return;
-    if (!connected || !wallet.account) {
+    if (!connected || !account || !signAndSubmitTransaction) {
       handleConnect();
       return;
     }
@@ -135,16 +135,22 @@ function MainApp() {
     try {
       setUploadStep('Uploading blob via Shelby SDK...');
       const arrayBuffer = await selectedFile.arrayBuffer();
+      const fileData = new Uint8Array(arrayBuffer);
       const fileNameToUse = customFileName || selectedFile.name;
       const expirationMicros = Date.now() * 1000 + 365 * 24 * 60 * 60 * 1000 * 1000;
       
+      const accountAddress = (account as any).accountAddress || account.address;
+
       await uploadBlobs.mutateAsync({
-        signer: wallet as any,
+        signer: {
+          account: accountAddress,
+          signAndSubmitTransaction,
+        },
         blobs: [{
           blobName: fileNameToUse,
-          blobData: new Uint8Array(arrayBuffer)
+          blobData: fileData,
         }],
-        expirationMicros
+        expirationMicros,
       });
       
       refetchBlobs();
