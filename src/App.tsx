@@ -20,7 +20,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { AptosWalletAdapterProvider, useWallet } from "@aptos-labs/wallet-adapter-react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ShelbyClientProvider } from "@shelby-protocol/react";
+import { ShelbyClientProvider, useUploadBlobs, useAccountBlobs } from "@shelby-protocol/react";
 import { ShelbyClient } from "@shelby-protocol/sdk/browser";
 import { Network } from "@aptos-labs/ts-sdk";
 
@@ -50,7 +50,8 @@ const XIcon = (props: React.SVGProps<SVGSVGElement>) => (
 );
 
 function MainApp() {
-  const { connected, account, connect, disconnect } = useWallet();
+  const wallet = useWallet();
+  const { connected, account, connect, disconnect } = wallet;
 
   const handleConnect = async () => {
     try {
@@ -68,17 +69,16 @@ function MainApp() {
 
   const activeAddress = account?.address ? account.address.toString() : '';
 
+  const { data: realBlobs, isLoading: isBlobsLoading, error: blobsError, refetch: refetchBlobs } = useAccountBlobs({ account: activeAddress });
+  const uploadBlobs = useUploadBlobs({});
+
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [customFileName, setCustomFileName] = useState<string>('');
-  const [isUploading, setIsUploading] = useState<boolean>(false);
+
   const [uploadStep, setUploadStep] = useState<string>('');
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [uploadType, setUploadType] = useState<'encrypted' | 'public' | 'private'>('encrypted');
 
-  const [localBlobs, setLocalBlobs] = useState<UploadedBlob[]>(() => {
-    const saved = localStorage.getItem('seedio_local_blobs');
-    return saved ? JSON.parse(saved) : [];
-  });
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
   const [activeFolderFilter, setActiveFolderFilter] = useState<string | null>(null);
@@ -127,55 +127,35 @@ function MainApp() {
 
   const handleUploadFile = async () => {
     if (!selectedFile) return;
-    if (!connected) {
+    if (!connected || !wallet.account) {
       handleConnect();
       return;
     }
-    setIsUploading(true);
-    setUploadProgress(10);
+    
     try {
-      setUploadStep('Reading and chunking local file data...');
-      setUploadProgress(20);
+      setUploadStep('Uploading blob via Shelby SDK...');
       const arrayBuffer = await selectedFile.arrayBuffer();
-      
-      setUploadStep('Applying Reed-Solomon erasure coding (16 chunks, 10 data, 6 parity)...');
-      setUploadProgress(45);
-      await new Promise(resolve => setTimeout(resolve, 800));
-
-      setUploadStep('Signing and registering blob commitment root on Aptos...');
-      setUploadProgress(65);
-      
       const fileNameToUse = customFileName || selectedFile.name;
-
-      setUploadStep('Transmitting fragmented chunks to decentralized nodes...');
-      setUploadProgress(85);
-      await new Promise(resolve => setTimeout(resolve, 600));
-
-      const commitmentHash = 'shelby_b0x' + Array.from({length: 32}, () => Math.floor(Math.random()*16).toString(16)).join('');
-      const newBlob: UploadedBlob = {
-        owner: activeAddress,
-        blobName: fileNameToUse,
-        blobCommitment: commitmentHash,
-        createdAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
-        size: selectedFile.size,
-        isWritten: true,
-        type: uploadType
-      };
-
-      const updatedLocal = [newBlob, ...localBlobs];
-      setLocalBlobs(updatedLocal);
-      localStorage.setItem('seedio_local_blobs', JSON.stringify(updatedLocal));
-
+      const expirationMicros = Date.now() * 1000 + 365 * 24 * 60 * 60 * 1000 * 1000;
+      
+      await uploadBlobs.mutateAsync({
+        signer: wallet as any,
+        blobs: [{
+          blobName: fileNameToUse,
+          blobData: new Uint8Array(arrayBuffer)
+        }],
+        expirationMicros
+      });
+      
+      refetchBlobs();
+      
       setSelectedFile(null);
       setCustomFileName('');
-      setUploadProgress(100);
       setSuccessToast(`Successfully uploaded ${fileNameToUse} to the Decentralized Vault!`);
       setShowUploadModal(false);
-    } catch (e) {
-      setErrorMessage('Upload error occurred.');
-    } finally {
-      setIsUploading(false);
+    } catch (e: any) {
+      console.error(e);
+      setErrorMessage(e.message || 'Upload error occurred.');
     }
   };
 
@@ -221,7 +201,19 @@ function MainApp() {
     const seen = new Set<string>();
     const merged: UploadedBlob[] = [];
 
-    for (const b of localBlobs) {
+    const mappedRealBlobs: UploadedBlob[] = (realBlobs || []).map(b => ({
+      owner: b.owner.toString(),
+      blobName: b.blobNameSuffix,
+      blobCommitment: b.blobMerkleRoot ? Array.from(b.blobMerkleRoot).map(byte => byte.toString(16).padStart(2, '0')).join('') : (b.uid?.toString() || 'unknown'),
+      createdAt: new Date(Number(b.creationMicros) / 1000).toISOString(),
+      expiresAt: new Date(Number(b.expirationMicros) / 1000).toISOString(),
+      size: b.size,
+      isWritten: b.isWritten,
+      sliceAddress: b.sliceAddress.toString(),
+      type: b.encryption === 'Unencrypted' ? 'public' : 'encrypted'
+    }));
+
+    for (const b of mappedRealBlobs) {
       if (!seen.has(b.blobCommitment)) {
         seen.add(b.blobCommitment);
         merged.push(b);
@@ -449,8 +441,8 @@ function MainApp() {
             setSearchQuery={setSearchQuery}
             viewMode={viewMode}
             setViewMode={setViewMode}
-            isLoadingBlobs={false}
-            onRefresh={() => {}}
+            isLoadingBlobs={isBlobsLoading}
+            onRefresh={() => refetchBlobs()}
             activeFolderFilter={activeFolderFilter}
             setActiveFolderFilter={setActiveFolderFilter}
             pinnedVaults={pinnedVaults}
@@ -533,7 +525,7 @@ function MainApp() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => {
-                if (!isUploading) setShowUploadModal(false);
+                if (!uploadBlobs.isPending) setShowUploadModal(false);
               }}
               className="absolute inset-0 bg-slate-950/80"
             />
@@ -555,7 +547,7 @@ function MainApp() {
                     <p className="text-[10px] text-slate-500">Lease storage space on the decentralized network</p>
                   </div>
                 </div>
-                {!isUploading && (
+                {!uploadBlobs.isPending && (
                   <button 
                     onClick={() => setShowUploadModal(false)}
                     className="p-1 rounded-lg hover:bg-slate-900 text-slate-400 hover:text-slate-200 transition-colors"
@@ -565,7 +557,7 @@ function MainApp() {
                 )}
               </div>
 
-              {!isUploading ? (
+              {!uploadBlobs.isPending ? (
                 <div className="space-y-4">
                   
                   <div 
@@ -646,17 +638,7 @@ function MainApp() {
 
                   <div className="space-y-2">
                     <p className="text-xs font-bold text-slate-200">{uploadStep}</p>
-                    <p className="text-[10px] text-slate-500 max-w-xs mx-auto">This process handles multi-node storage handshake contracts and on-chain hash registrations.</p>
-                  </div>
-
-                  <div className="space-y-1 max-w-xs mx-auto">
-                    <div className="flex justify-between text-[10px] font-mono text-slate-500">
-                      <span>Consensus Progress</span>
-                      <span>{uploadProgress}%</span>
-                    </div>
-                    <div className="h-1.5 w-full bg-slate-950 rounded-full overflow-hidden">
-                      <div className="h-full bg-gradient-to-r from-cyan-400 to-blue-500 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
-                    </div>
+                    <p className="text-[10px] text-slate-500 max-w-xs mx-auto">Please confirm the transaction in your Petra wallet.</p>
                   </div>
                 </div>
               )}
