@@ -8,7 +8,7 @@ Seedio is a Web3 dApp that lets users securely upload, store, and manage files o
 
 ## 🚀 Live App
 
-🔗 [seedio-rho.vercel.app](https://seedio-rho.vercel.app)
+🔗 [seedio-rho.vercel.app](https://seedio-apt.vercel.app/)
 
 ---
 
